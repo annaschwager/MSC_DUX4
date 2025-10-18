@@ -1,0 +1,889 @@
+---
+title: "msc_dux4_2025"
+author: "Anna Schwager"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r lib, warning=FALSE, message=FALSE}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(msigdbr)
+library(purrr)
+library(patchwork)
+library(forcats)
+library(tibble)
+
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(ggrastr)
+library(ggvenn)
+library(VennDiagram)
+library(org.Hs.eg.db)
+library(ggplotify)
+
+library(fgsea)
+```
+
+# Load data
+```{r load, warning=FALSE, message=FALSE}
+counts <- read.csv("readcount_MSC_DUX4.csv")
+```
+
+# Map ENSEMBL IDs to gene symbols
+
+```{r map, warning=FALSE, message=FALSE}
+
+symbols <- mapIds(org.Hs.eg.db,
+                  keys = counts$gene_id,
+                  column = "SYMBOL",
+                  keytype = "ENSEMBL",
+                  multiVals = "first")
+
+counts$gene_symbol <- symbols
+
+
+num_cols <- which(sapply(counts, is.numeric))
+
+counts <- aggregate(counts[, num_cols],
+                    by = list(gene_symbol = counts$gene_symbol),
+                    FUN = sum)
+
+rownames(counts) <- counts$gene_symbol
+counts$gene_symbol <- NULL
+
+```
+
+# Check library sizes
+
+```{r sizes, warning=FALSE, message=FALSE}
+boxplot(log(counts + 1))
+```
+
+# Filtering low counts
+```{r filt, warning=FALSE, message=FALSE}
+dim(counts)
+
+counts_per_gene <- rowSums(counts)
+table(counts_per_gene > 0)
+counts <- counts[which(counts_per_gene > 0), ]
+
+boxplot(log(counts + 1))
+```
+
+# Differential expression analysis 
+## DESeq2 
+```{r deseq, warning=FALSE, message=FALSE}
+cond <- gsub("_[0-9]+$", "", colnames(counts))
+cond 
+
+dds <- DESeqDataSetFromMatrix(counts,
+                              colData = DataFrame(cond),
+                              design = ~ cond) 
+colData(dds)
+dds <- DESeq(dds)
+```
+
+```{r res, warning=FALSE, message=FALSE}
+res_DUX4ind_vs_c <- results(dds, contrast = c("cond", "MSC_DUX4_DOX", "ctrl"))
+res_DUX4ind_vs_c <- res_DUX4ind_vs_c[complete.cases(res_DUX4ind_vs_c),] 
+res_DUX4ind_vs_c <- res_DUX4ind_vs_c[order(res_DUX4ind_vs_c$padj),] 
+write.csv(res_DUX4ind_vs_c, "res_DUX4ind_vs_c.csv")
+summary(res_DUX4ind_vs_c) 
+
+```
+```{r res2, warning=FALSE, message=FALSE}
+res_DUX4_vs_c <- results(dds, contrast = c("cond", "MSC_DUX4", "ctrl"))
+res_DUX4_vs_c <- res_DUX4_vs_c[complete.cases(res_DUX4_vs_c),] 
+res_DUX4_vs_c <- res_DUX4_vs_c[order(res_DUX4_vs_c$padj),] 
+write.csv(res_DUX4_vs_c, "res_DUX4_vs_c.csv")
+summary(res_DUX4_vs_c) 
+
+```
+```{r res3, warning=FALSE, message=FALSE}
+res_DUX4ind_vs_DUX4 <- results(dds, contrast = c("cond", "MSC_DUX4_DOX", "MSC_DUX4"))
+res_DUX4ind_vs_DUX4 <- res_DUX4ind_vs_DUX4[complete.cases(res_DUX4ind_vs_DUX4),] 
+res_DUX4ind_vs_DUX4 <- res_DUX4ind_vs_DUX4[order(res_DUX4ind_vs_DUX4$padj),] 
+write.csv(res_DUX4ind_vs_DUX4, "res_DUX4ind_vs_DUX4.csv")
+summary(res_DUX4ind_vs_DUX4) 
+
+```
+
+## PCA 
+```{r pca, warning=FALSE, message=FALSE}
+rld <- rlog(dds) 
+plotPCA(rld, intgroup="cond") 
+
+```
+
+## Venn induced vs non-induced
+```{r venn, warning=FALSE, message=FALSE}
+alpha   <- 0.05           # FDR cutoff
+lfc_thr <- 1              # absolute log2FC cutoff
+
+
+# Significance calls
+up1   <- rownames(res_DUX4ind_vs_c)[res_DUX4ind_vs_c$padj < alpha & res_DUX4ind_vs_c$log2FoldChange >=  lfc_thr]
+down1 <- rownames(res_DUX4ind_vs_c)[res_DUX4ind_vs_c$padj < alpha & res_DUX4ind_vs_c$log2FoldChange <= -lfc_thr]
+
+up2   <- rownames(res_DUX4ind_vs_DUX4)[res_DUX4ind_vs_DUX4$padj < alpha & res_DUX4ind_vs_DUX4$log2FoldChange >=  lfc_thr]
+down2 <- rownames(res_DUX4ind_vs_DUX4)[res_DUX4ind_vs_DUX4$padj < alpha & res_DUX4ind_vs_DUX4$log2FoldChange <= -lfc_thr]
+
+up3 <- rownames(res_DUX4_vs_c)[res_DUX4_vs_c$padj < alpha & res_DUX4_vs_c$log2FoldChange >=  lfc_thr]
+down3 <- rownames(res_DUX4_vs_c)[res_DUX4_vs_c$padj < alpha & res_DUX4_vs_c$log2FoldChange <= -lfc_thr]
+
+# Overlaps
+up_overlap   <- intersect(up1, up2)
+down_overlap <- intersect(down1, down2)
+
+p_up <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `MSC-DUX4 + DOX vs MSC-DUX4 (UP)` = up2),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "grey")
+) + ggtitle("Significantly UP genes") 
+
+p_down <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `MSC-DUX4 + DOX vs MSC-DUX4 (DOWN)` = down2),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "grey")
+) + ggtitle("Significantly DOWN genes")
+
+print(p_up)
+print(p_down)
+
+```
+# DUX4 and PAX7 targets expression
+```{r signatures, warning=FALSE, message=FALSE}
+dux4_signature_geng <- read.csv("geng_dux4_signature_up.csv")
+msig_tft <- msigdbr(species = "Homo sapiens", category = "C3", subcategory = "TFT:GTRD")
+
+pax7_targets <- msig_tft %>%
+  filter(gs_name == "PAX7_TARGET_GENES") %>%
+  pull(gene_symbol)
+
+```
+
+## Venn diagrams - signatures
+```{r signatures2, warning=FALSE, message=FALSE}
+venn_dux4_targets <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `DUX4 targets Geng et al` = dux4_signature_geng$Symbol),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "grey")
+) + ggtitle("DUX4 targets vs UP genes ") 
+
+
+venn_dux4_targets_all <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `MSC-DUX4 vs ctrl MSC (UP)` = up3,
+       `DUX4 targets Geng et al` = dux4_signature_geng$Symbol),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color = c("#5DADE2", "yellowgreen", "grey")
+) + ggtitle("DUX4 targets vs UP genes ") 
+
+
+venn_pax7_targets <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `PAX7 targets (MSIG_DB:M30110)` = pax7_targets),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "grey")
+) + ggtitle("PAX7 targets vs DOWN genes ") 
+
+venn_pax7_targets_all <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `MSC-DUX4 vs ctrl MSC (DOWN)` = down3,
+       `PAX7 targets (MSIG_DB:M30110)` = pax7_targets),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "yellowgreen", "grey")
+) + ggtitle("PAX7 targets vs DOWN genes ") 
+
+
+p1 <- venn_dux4_targets | venn_pax7_targets 
+p2 <- venn_dux4_targets_all | venn_pax7_targets_all
+
+p1
+p2
+
+```
+
+
+```{r save1, eval = FALSE}
+ggsave("./plots/venn_dux4.pdf",
+       p1)
+
+ggsave("./plots/venn_dux4_all.pdf",
+       p2)
+```
+
+
+
+## Top 12 upregulated DUX4 targets 
+```{r dux, warning=FALSE, message=FALSE}
+norm_counts <- counts(dds, normalized = TRUE)
+
+res_tbl <- as.data.frame(res_DUX4ind_vs_c) %>%
+  tibble::rownames_to_column("symbol")
+
+sample_cond <- setNames(as.character(colData(dds)$cond), colnames(dds))
+
+```
+
+
+```{r dux2, warning=FALSE, message=FALSE}
+top12_dux <- res_tbl %>%
+  filter(symbol %in% intersect(up1, dux4_signature_geng$Symbol),
+         !is.na(padj), padj < 0.05,
+         !is.na(log2FoldChange), log2FoldChange > 0) %>%
+  arrange(desc(log2FoldChange), padj) %>%
+  slice_head(n = 12) %>%
+  pull(symbol)
+
+
+long_df <- as.data.frame(norm_counts[top12_dux, , drop = FALSE]) %>%
+  tibble::rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "norm_count") %>%
+  mutate(cond = sample_cond[sample]) 
+
+```
+
+```{r dux3, warning=FALSE, message=FALSE}
+
+cols <- c(ctrl = "#E74C3C", MSC_DUX4 = "yellowgreen", MSC_DUX4_DOX = "#5DADE2")
+
+p_box_dux_1 <- ggplot(long_df, aes(x = cond, y = norm_count)) +
+  geom_boxplot(aes(fill = cond), outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 1) +
+  scale_fill_manual(values = cols) +
+  facet_wrap(~ gene, scales = "free_y", ncol = 4) +
+  labs(x = NULL,
+       y = "DESeq2 normalized counts",
+       title = "Top 12 upregulated DUX4-signature genes") +
+  theme_classic(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p_box_dux_1 
+```
+
+```{r dux4, warning=FALSE, message=FALSE}
+
+cols <- c(ctrl = "#E74C3C", MSC_DUX4_DOX = "#5DADE2")
+
+p_box_dux_2 <- ggplot(
+  long_df %>% filter(cond != "MSC_DUX4"),
+  aes(x = cond, y = norm_count)
+) +
+  geom_boxplot(aes(fill = cond), outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 1) +
+  scale_fill_manual(values = cols) +
+  facet_wrap(~ gene, scales = "free_y", ncol = 4) +
+  labs(
+    x = NULL,
+    y = "DESeq2 normalized counts",
+    title = "Top 12 upregulated DUX4-signature genes (without MSC_DUX4)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  )
+
+p_box_dux_2
+```
+
+```{r save2, eval =FALSE}
+ggsave("./plots/box_dux4.pdf",
+       p_box_dux_1,
+       width = 20,
+      height = 15,
+      units = "cm")
+
+ggsave("./plots/box_dux4_main.pdf",
+       p_box_dux_2,
+       width = 20,
+      height = 15,
+      units = "cm")
+```
+
+
+## Top 12 downregulated PAX7 targets 
+```{r pax, warning=FALSE, message=FALSE}
+
+top12_pax <- res_tbl %>%
+  filter(symbol %in% intersect(down1, pax7_targets),
+         !is.na(padj), padj < 0.05,
+         !is.na(log2FoldChange), log2FoldChange < 0) %>%
+  arrange(desc(log2FoldChange), padj) %>%
+  slice_head(n = 12) %>%
+  pull(symbol)
+
+long_df <- as.data.frame(norm_counts[top12_pax, , drop = FALSE]) %>%
+  tibble::rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "norm_count") %>%
+  mutate(cond = sample_cond[sample]) 
+
+```
+
+
+```{r pax2, warning=FALSE, message=FALSE}
+
+cols <- c(ctrl = "#E74C3C", MSC_DUX4 = "yellowgreen", MSC_DUX4_DOX = "#5DADE2")
+
+p_box_pax_1 <- ggplot(long_df, aes(x = cond, y = norm_count)) +
+  geom_boxplot(aes(fill = cond), outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 1) +
+  scale_fill_manual(values = cols) +
+  facet_wrap(~ gene, scales = "free_y", ncol = 4) +
+  labs(x = NULL,
+       y = "DESeq2 normalized counts",
+       title = "Top 12 downregulates PAX7-signature genes") +
+  theme_classic(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p_box_pax_1
+```
+
+```{r pax3, warning=FALSE, message=FALSE}
+
+cols <- c(ctrl = "#E74C3C", MSC_DUX4_DOX = "#5DADE2")
+
+p_box_pax_2 <- ggplot(
+  long_df %>% filter(cond != "MSC_DUX4"),
+  aes(x = cond, y = norm_count)
+) +
+  geom_boxplot(aes(fill = cond), outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 1) +
+  scale_fill_manual(values = cols) +
+  facet_wrap(~ gene, scales = "free_y", ncol = 4) +
+  labs(
+    x = NULL,
+    y = "DESeq2 normalized counts",
+    title = "Top 12 downregulated PAX7-signature genes (without MSC_DUX4)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  )
+
+p_box_pax_2
+```
+
+```{r save3, eval = FALSE}
+ggsave("./plots/box_pax.pdf",
+       p_box_pax_1,
+      width = 20,
+      height = 15,
+      units = "cm")
+
+ggsave("./plots/box_pax_main.pdf",
+       p_box_pax_2,
+      width = 20,
+      height = 15,
+      units = "cm")
+```
+
+# Global GSEA 
+Ranking genes
+```{r gsea1, warning=FALSE, message=FALSE}
+res <- as.data.frame(res_DUX4ind_vs_c)
+res$gene_id <- rownames(res)
+
+res <- res %>% arrange(desc(log2FoldChange))
+
+ranks <- res$log2FoldChange
+names(ranks) <- res$gene_id
+```
+
+## Hallmark gene sets
+```{r gsea2, warning=FALSE, message=FALSE}
+msig_h <- msigdbr(species = "Homo sapiens", category = "H") %>%
+  dplyr::select(gs_name, gene_symbol) %>%
+  distinct()
+
+hallmark <- msig_h %>%
+  group_by(gs_name) %>%
+  summarise(genes = list(unique(gene_symbol)), .groups = "drop") %>%
+  { setNames(.$genes, .$gs_name) }
+
+```
+
+```{r gsea3, warning=FALSE, message=FALSE}
+fg_all <- fgsea(
+  pathways = hallmark,
+  stats    = ranks,
+  minSize  = 5,
+  maxSize  = 2000,
+) %>% arrange(padj)
+
+head(fg_all[, c("pathway","size","NES","pval","padj")], 10)
+
+
+fg_all_out <- fg_all %>%
+  as.data.frame() %>%
+  mutate(leadingEdge = vapply(leadingEdge, function(x) paste(x, collapse = ";"), character(1))) %>%
+  arrange(padj)
+
+#write.csv(fg_all_out, "GSEA_Hallmark_results.csv", row.names = FALSE)
+
+```
+```{r gsea4, warning=FALSE, message=FALSE}
+
+# all significant pathways
+fg_plot <- fg_all %>%
+  mutate(pathway_clean = gsub("^HALLMARK_", "", pathway),
+         pathway_clean = gsub("_", " ", pathway_clean)) %>%
+  arrange(padj) %>%
+  slice_head(n = 15) %>%
+  mutate(pathway_clean = fct_reorder(pathway_clean, NES))
+
+p4 <- ggplot(fg_plot, aes(x = pathway_clean, y = NES, fill = padj)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(
+    low = "#E74C3C",
+    high = "#5DADE2", 
+    trans = "log10",
+    name = "Adjusted p-value"
+  ) +
+  labs(
+    x = NULL,
+    y = "Normalized Enrichment Score (NES)",
+    title = "Significantly enriched Hallmark pathways"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 13)
+  )
+
+p4
+```
+```{r save4, eval=FALSE}
+ggsave("./plots/gsea_all.pdf",
+       p4,
+      width = 20,
+      height = 10,
+      units = "cm")
+
+```
+
+# Programs expression
+
+```{r prog1, warning=FALSE, message=FALSE}
+msig_hallmark <- msigdbr(species = "Homo sapiens", category = "H")
+msig_bp <- msigdbr(species = "Homo sapiens", category = "C5", subcategory = "BP")
+msig_curated <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CGP")
+
+
+myo_genes <- msig_hallmark %>%
+  filter(gs_name == "HALLMARK_MYOGENESIS") %>%
+  pull(gene_symbol)
+
+adip_genes <- msig_hallmark %>%
+  filter(gs_name == "HALLMARK_ADIPOGENESIS") %>%
+  pull(gene_symbol)
+
+angio_genes <- msig_hallmark %>%
+  filter(gs_name == "HALLMARK_ANGIOGENESIS") %>%
+  pull(gene_symbol)
+
+osteo_genes <- msig_bp %>%
+  filter(gs_name == "GOBP_OSTEOBLAST_DIFFERENTIATION") %>%
+  pull(gene_symbol)
+
+chondro_genes <- msig_bp %>%
+  filter(gs_name == "GOBP_CHONDROCYTE_DIFFERENTIATION") %>%
+  pull(gene_symbol)
+
+```
+
+## Lineage programs
+### Up
+```{r up, warning=FALSE, message=FALSE}
+p_up_myo <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `HALLMARK_MYOGENESIS` = myo_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#E74C3C")
+) + ggtitle("UP genes vs Myogenesis genes") 
+
+p_up_adip <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `HALLMARK_ADIPOGENESIS` = adip_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#FFC125")
+) + ggtitle("UP genes vs Adipogenesis genes") 
+
+p_up_osteo <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `GOBP_OSTEOBLAST_DIFFERENTIATION` = osteo_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#8B795E")
+) + ggtitle("UP genes vs Osteogenesis genes")
+
+p_up_chondro <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `GOBP_CHONDROCYTE_DIFFERENTIATION` = chondro_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "plum")
+) + ggtitle("UP genes vs Chondrogenesis genes")
+
+
+p_prog_up <- p_up_osteo / p_up_adip / p_up_chondro / p_up_myo 
+p_prog_up
+
+```
+
+```{r save5, eval=FALSE}
+ggsave("./plots/p_prog_upl.pdf",
+      p_prog_up,
+      width = 20,
+      height = 15,
+      units = "cm")
+
+```
+
+### Down
+```{r down, warning=FALSE, message=FALSE}
+p_down_myo <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = down1,
+       `HALLMARK_MYOGENESIS` = myo_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#E74C3C")
+) + ggtitle("DOWN genes vs Myogenesis genes") 
+
+p_down_adip <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = down1,
+       `HALLMARK_ADIPOGENESIS` = adip_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#FFC125")
+) + ggtitle("DOWN genes vs Adipogenesis genes") 
+
+p_down_osteo <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = down1,
+       `GOBP_BONE_CELL_DEVELOPMENT` = osteo_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#8B795E")
+) + ggtitle("DOWN genes vs Osteogenesis genes")
+
+
+p_down_chondro <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = down1,
+       `GOBP_CHONDROCYTE_DEVELOPMENT` = chondro_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "plum")
+) + ggtitle("DOWN genes vs Chondrogenesis genes")
+
+p_prog_down <- p_down_osteo / p_down_adip / p_down_chondro / p_down_myo 
+p_prog_down
+
+```
+
+```{r save6, eval=FALSE}
+ggsave("./plots/p_prog_down.pdf",
+      p_prog_down,
+      width = 20,
+      height = 15,
+      units = "cm")
+
+```
+
+
+
+## Volcano with myogenesis genes highlighted
+
+```{r volc1, warning=FALSE, message=FALSE}
+
+bp <- msigdbr(species = "Homo sapiens", category = "C5", subcategory = "GO:BP") %>%
+  dplyr::select(gs_name, gene_symbol) %>%
+  distinct()
+
+bp <- bp %>%
+  group_by(gs_name) %>%
+  summarise(genes = list(unique(gene_symbol)), .groups = "drop") %>%
+  { setNames(.$genes, .$gs_name) }
+
+myo_der_genes <- intersect(up1, myo_genes)
+GOBP_NEGATIVE_REGULATION_OF_SMOOTH_MUSCLE_CELL_DIFFERENTIATION <- intersect(down1, bp$GOBP_NEGATIVE_REGULATION_OF_SMOOTH_MUSCLE_CELL_DIFFERENTIATION)
+
+```
+
+
+```{r volc2, warning=FALSE, message=FALSE}
+
+res_tbl <- as.data.frame(res_DUX4ind_vs_c) |>
+  tibble::rownames_to_column("gene") |>
+  mutate(group = case_when(
+    gene %in% myo_der_genes        ~ "HALLMARK_MYOGENESIS",
+    gene %in% GOBP_NEGATIVE_REGULATION_OF_SMOOTH_MUSCLE_CELL_DIFFERENTIATION      ~ "GOBP_NEG_REG_OF_SM_MUS_C_DIFF",
+    TRUE                          ~ "Other"
+  ))
+
+# avoid Inf in -log10
+res_tbl$padj[res_tbl$padj == 0] <- .Machine$double.xmin
+
+res_bg <- res_tbl |> filter(group == "Other")
+res_fg <- res_tbl |> filter(group != "Other")
+
+cols <- c(HALLMARK_MYOGENESIS = "#E74C3C",
+          GOBP_NEG_REG_OF_SM_MUS_C_DIFF = "#5DADE2")
+
+```
+
+
+```{r volc3, warning=FALSE, message=FALSE}
+
+p_volcano <- ggplot() +
+  # 1) grey background points FIRST
+  geom_point(data = res_bg,
+             aes(x = log2FoldChange, y = -log10(padj)),
+             color = "grey75", alpha = 0.6, size = 1.5) +
+  # 2) colored groups ON TOP
+  geom_point(data = res_fg,
+             aes(x = log2FoldChange, y = -log10(padj), color = group),
+             alpha = 0.95, size = 2.2) +
+  scale_color_manual(values = cols, breaks = names(cols), name = NULL) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.5) +
+  labs(title = "MSC-DUX4 induced vs Control MSC",
+       x = "log2 Fold Change",
+       y = expression(-log[10](adjusted~p~value))) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+  # labels only for colored groups
+  geom_text_repel(data = res_fg,
+                  aes(x = log2FoldChange, y = -log10(padj), label = gene, color = group),
+                  size = 3, box.padding = 0.3, point.padding = 0.2,
+                  segment.color = "grey70", max.overlaps = 20, show.legend = FALSE)
+
+p_volcano
+
+
+p_volcano_rast <- ggplot() +
+  geom_point_rast(data = res_bg,
+                  aes(x = log2FoldChange, y = -log10(padj)),
+                  color = "grey75", alpha = 0.6, size = 1.5,
+                  raster.dpi = 300) +
+  geom_point_rast(data = res_fg,
+                  aes(x = log2FoldChange, y = -log10(padj), color = group),
+                  alpha = 0.95, size = 2.2,
+                  raster.dpi = 300) +
+  scale_color_manual(values = cols, breaks = names(cols), name = NULL) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.5) +
+  labs(title = "MSC-DUX4 induced vs Control MSC",
+       x = "log2 Fold Change",
+       y = expression(-log[10](adjusted~p~value))) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+  geom_text_repel(data = res_fg,
+                  aes(x = log2FoldChange, y = -log10(padj), label = gene, color = group),
+                  size = 3, box.padding = 0.3, point.padding = 0.2,
+                  segment.color = "grey70", max.overlaps = 20, show.legend = FALSE)
+```
+```{r save7, eval = FALSE}
+ggsave("./plots/myo_volcano.pdf",
+       p_volcano,
+      width = 18,
+      height = 10,
+      units = "cm")
+
+ggsave("./plots/mvolcano_rasterized.pdf",
+      p_volcano_rast,
+      width = 20,
+      height = 12,
+      units = "cm")
+
+```
+
+
+## ECM genes expression 
+
+```{r ecm1, warning=FALSE, message=FALSE}
+core_matrisome <- msig_curated %>%
+  filter(gs_name == "NABA_CORE_MATRISOME") %>%
+  pull(gene_symbol)
+
+col_genes <- msig_curated %>%
+  filter(gs_name == "NABA_COLLAGENS") %>%
+  pull(gene_symbol)
+
+gly_genes <- msig_curated %>%
+  filter(gs_name == "NABA_ECM_GLYCOPROTEINS") %>%
+  pull(gene_symbol)
+
+ecm_reg_genes <- msig_curated %>%
+  filter(gs_name == "NABA_ECM_REGULATORS") %>%
+  pull(gene_symbol)
+
+
+```
+
+```{r ecm2, warning=FALSE, message=FALSE}
+p_ecm <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `core_matrisome` = core_matrisome),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#5DADE2","orchid")
+) + ggtitle("Diff genes vs Core matrisome genes") 
+
+p_ecm_reg <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `NABA_ECM_REGULATORS` = ecm_reg_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2", "#5DADE2","orchid")
+) + ggtitle("Diff genes vs ECM regulators genes") 
+
+p_col <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `NABA_COLLAGENS` = col_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2","#5DADE2","orchid")
+) + ggtitle("Diff genes vs Collagen genes") 
+
+p_gly <- ggvenn(
+  list(`MSC-DUX4 + DOX vs ctrl MSC (UP)` = up1,
+       `MSC-DUX4 + DOX vs ctrl MSC (DOWN)` = down1,
+       `NABA_NABA_ECM_GLYCOPROTEINS` = gly_genes),
+  show_percentage = FALSE,
+  set_name_size = 3.5,
+  fill_color   = c("#5DADE2","#5DADE2","orchid")
+) + ggtitle("Diff genes vs Collagen genes") 
+
+ecm <- p_ecm | p_col | p_gly | p_ecm_reg
+ecm
+```
+```{r save8, eval = FALSE}
+ggsave("./plots/ecm_venn.pdf",
+      ecm,
+      width = 40,
+      height = 15,
+      units = "cm")
+```
+
+## Volcano with ECM genes
+
+```{r volc_ecm, warning=FALSE, message=FALSE}
+col_genes_der <- intersect(c(up1,down1), col_genes)
+gly_genes_der <- intersect(c(up1,down1), gly_genes)
+
+```
+
+
+```{r volc_ecm2, warning=FALSE, message=FALSE}
+
+res_tbl <- as.data.frame(res_DUX4ind_vs_c) |>
+  tibble::rownames_to_column("gene") |>
+  mutate(group = case_when(
+    gene %in% col_genes_der        ~ "NABA_COLLAGENS",
+    gene %in% gly_genes_der      ~ "NABA_ECM_GLYCOPROTEINS",
+    TRUE                          ~ "Other"
+  ))
+
+# avoid Inf in -log10
+res_tbl$padj[res_tbl$padj == 0] <- .Machine$double.xmin
+
+res_bg <- res_tbl |> filter(group == "Other")
+res_fg <- res_tbl |> filter(group != "Other")
+
+
+label_genes <- bind_rows(
+  res_fg |> filter(group == "NABA_COLLAGENS"),
+  res_fg |> 
+    filter(group == "NABA_ECM_GLYCOPROTEINS") |> 
+    arrange(desc(abs(log2FoldChange))) |> 
+    slice_head(n = 10)
+)
+
+cols <- c(NABA_COLLAGENS = "orchid4",
+          NABA_ECM_GLYCOPROTEINS = "lightcoral")
+
+```
+
+
+```{r volc_ecm3, warning=FALSE, message=FALSE}
+
+p_volcano_ecm <- ggplot() +
+  geom_point(data = res_bg,
+             aes(x = log2FoldChange, y = -log10(padj)),
+             color = "grey75", alpha = 0.6, size = 1.5) +
+  geom_point(data = res_fg,
+             aes(x = log2FoldChange, y = -log10(padj), color = group),
+             alpha = 0.95, size = 2.2) +
+  scale_color_manual(values = cols, breaks = names(cols), name = NULL) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.5) +
+  labs(title = "MSC-DUX4 induced vs Control MSC",
+       x = "log2 Fold Change",
+       y = expression(-log[10](adjusted~p~value))) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+  geom_text_repel(
+    data = label_genes,
+    aes(x = log2FoldChange, y = -log10(padj), label = gene, color = group),
+    size = 3, box.padding = 0.3, point.padding = 0.2,
+    segment.color = "grey70", max.overlaps = 30, show.legend = FALSE
+  )
+
+p_volcano_ecm
+
+
+p_volcano_ecm_rast <- ggplot() +
+  geom_point_rast(data = res_bg,
+             aes(x = log2FoldChange, y = -log10(padj)),
+             color = "grey75", alpha = 0.6, size = 1.5) +
+  geom_point_rast(data = res_fg,
+             aes(x = log2FoldChange, y = -log10(padj), color = group),
+             alpha = 0.95, size = 2.2) +
+  scale_color_manual(values = cols, breaks = names(cols), name = NULL) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.5) +
+  labs(title = "MSC-DUX4 induced vs Control MSC",
+       x = "log2 Fold Change",
+       y = expression(-log[10](adjusted~p~value))) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) +
+  geom_text_repel(
+    data = label_genes,
+    aes(x = log2FoldChange, y = -log10(padj), label = gene, color = group),
+    size = 3, box.padding = 0.3, point.padding = 0.2,
+    segment.color = "grey70", max.overlaps = 30, show.legend = FALSE
+  )
+
+```
+```{r save 9, eval = FALSE}
+
+ggsave("./plots/ecm_volcano_rasterized.pdf",
+      p_volcano_ecm_rast,
+      width = 20,
+      height = 12,
+      units = "cm")
+
+```
+
+
